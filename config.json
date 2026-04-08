@@ -1,6 +1,12 @@
 {
-  "watchlist": [
-    "Cornerstone Total Return Fund",
-    "Cornerstone Strategic Investment Fund"
+  "funds": [
+    {
+      "name": "Cornerstone Total Return Fund, Inc.",
+      "cik": "0000033934"
+    },
+    {
+      "name": "Cornerstone Strategic Investment Fund, Inc.",
+      "cik": "0000814083"
+    }
   ]
 }

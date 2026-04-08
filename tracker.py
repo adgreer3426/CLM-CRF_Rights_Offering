@@ -2,8 +2,8 @@
 """
 SEC EDGAR Rights Offering Tracker
 
-Polls EDGAR full-text search for new rights offering filings and sends
-SMS alerts via email-to-SMS carrier gateway.
+Polls data.sec.gov/submissions for 424B3 filings from specific funds
+and sends SMS alerts via email-to-SMS carrier gateway.
 
 Required environment variables:
   SMTP_HOST     - e.g. smtp.gmail.com
@@ -11,47 +11,34 @@ Required environment variables:
   SMTP_USER     - your Gmail address
   SMTP_PASS     - Gmail app password (not your account password)
   SMS_EMAIL     - your_number@tmomail.net
-  EDGAR_AGENT   - "YourName your@email.com" (required by SEC)
+  EDGAR_AGENT   - "Your Name your@email.com" (required by SEC)
 """
 
 import json
 import os
 import smtplib
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
 
-EDGAR_EFTS_URL = "https://efts.sec.gov/LATEST/search-index"
 STATE_FILE = Path(__file__).parent / "seen_filings.json"
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
-# Customize these to narrow or broaden what you track
-SEARCH_QUERY = '"rights"'
-FORM_TYPES = "424B3"
-LOOKBACK_DAYS = 2  # overlap prevents gaps if a run is skipped
+LOOKBACK_DAYS = 3
+TARGET_FORM = "424B3"
 
 
-def load_watchlist() -> list:
-    if not CONFIG_FILE.exists():
-        return []
+def load_config() -> list:
     data = json.loads(CONFIG_FILE.read_text())
-    return [name.lower() for name in data.get("watchlist", [])]
-
-
-def matches_watchlist(company: str, watchlist: list) -> bool:
-    if not watchlist:
-        return True  # no filter — alert on everything
-    company_lower = company.lower()
-    return any(term in company_lower for term in watchlist)
+    return data["funds"]
 
 
 def load_seen() -> set:
     if STATE_FILE.exists():
-        data = json.loads(STATE_FILE.read_text())
-        return set(data)
+        return set(json.loads(STATE_FILE.read_text()))
     return set()
 
 
@@ -59,43 +46,33 @@ def save_seen(seen: set) -> None:
     STATE_FILE.write_text(json.dumps(sorted(seen), indent=2))
 
 
-def search_edgar() -> list:
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
-    start_date = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-
-    params = {
-        "q": SEARCH_QUERY,
-        "forms": FORM_TYPES,
-        "dateRange": "custom",
-        "startdt": start_date,
-        "enddt": end_date,
-    }
-
-    agent = os.environ.get("EDGAR_AGENT", "rights-offering-tracker contact@example.com")
-    resp = requests.get(
-        EDGAR_EFTS_URL,
-        params=params,
-        headers={"User-Agent": agent},
-        timeout=30,
-    )
+def get_recent_filings(cik: str, agent: str) -> list:
+    """Fetch recent filings for a CIK from data.sec.gov/submissions."""
+    cik_padded = cik.lstrip("0").zfill(10)
+    url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    resp = requests.get(url, headers={"User-Agent": agent}, timeout=30)
     resp.raise_for_status()
-    return resp.json().get("hits", {}).get("hits", [])
+
+    data = resp.json()
+    recent = data.get("filings", {}).get("recent", {})
+
+    forms = recent.get("form", [])
+    dates = recent.get("filingDate", [])
+    accessions = recent.get("accessionNumber", [])
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+
+    results = []
+    for form, date, adsh in zip(forms, dates, accessions):
+        if form == TARGET_FORM and date >= cutoff:
+            results.append({"form": form, "date": date, "adsh": adsh})
+    return results
 
 
-def filing_url(adsh: str, cik: str) -> str:
-    # adsh format: 0001234567-24-000001
-    cik_int = str(int(cik))  # strip leading zeros
+def filing_url(cik: str, adsh: str) -> str:
+    cik_int = str(int(cik))
     clean = adsh.replace("-", "")
     return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{clean}/"
-
-
-def parse_company(display_names: list) -> str:
-    # display_names entries look like: "COMPANY NAME  (TICK)  (CIK 0001234567)"
-    if not display_names:
-        return "Unknown"
-    raw = display_names[0]
-    # Take everything before the first parenthetical
-    return raw.split("(")[0].strip() or raw
 
 
 def send_sms(subject: str, body: str) -> None:
@@ -117,43 +94,33 @@ def send_sms(subject: str, body: str) -> None:
 
 
 def main() -> int:
-    watchlist = load_watchlist()
-    if watchlist:
-        print(f"Watchlist: {len(watchlist)} name(s)")
-    else:
-        print("No watchlist — alerting on all rights offering filings")
-
+    agent = os.environ.get("EDGAR_AGENT", "rights-offering-tracker contact@example.com")
+    funds = load_config()
     seen = load_seen()
-    hits = search_edgar()
+
+    print(f"Checking {len(funds)} fund(s) for {TARGET_FORM} filings...")
 
     new_count = 0
-    for hit in hits:
-        src = hit.get("_source", {})
-        adsh = src.get("adsh", "")
+    for fund in funds:
+        name = fund["name"]
+        cik = fund["cik"]
+        print(f"  {name} (CIK {cik})")
 
-        if not adsh or adsh in seen:
-            continue
+        filings = get_recent_filings(cik, agent)
+        for f in filings:
+            key = f["adsh"]
+            if key in seen:
+                continue
 
-        company = parse_company(src.get("display_names", []))
+            seen.add(key)
+            new_count += 1
+            url = filing_url(cik, f["adsh"])
 
-        if not matches_watchlist(company, watchlist):
-            seen.add(adsh)  # mark seen so we don't recheck it
-            continue
+            subject = f"424B3: {name[:50]}"
+            body = f"Filed {f['date']}\n{url}"
 
-        seen.add(adsh)
-        new_count += 1
-
-        form = src.get("form", "")
-        date = src.get("file_date", "")
-        cik = (src.get("ciks") or ["0"])[0]
-        url = filing_url(adsh, cik)
-
-        # Keep SMS short — carrier gateways truncate long messages
-        subject = f"Rights Offering: {company[:50]}"
-        body = f"{form} filed {date}\n{url}"
-
-        print(f"  [{new_count}] {company} ({form}) on {date}")
-        send_sms(subject, body)
+            print(f"    NEW: {f['form']} on {f['date']}")
+            send_sms(subject, body)
 
     save_seen(seen)
     print(f"Done. {new_count} new filing(s) found.")
