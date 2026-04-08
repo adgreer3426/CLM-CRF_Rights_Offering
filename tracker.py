@@ -16,13 +16,12 @@ Required environment variables:
 
 import json
 import os
-import smtplib
 import sys
 from datetime import datetime, timedelta, timezone
-from email.mime.text import MIMEText
 from pathlib import Path
 
 import requests
+from twilio.rest import Client
 
 STATE_FILE = Path(__file__).parent / "seen_filings.json"
 CONFIG_FILE = Path(__file__).parent / "config.json"
@@ -76,21 +75,12 @@ def filing_url(cik: str, adsh: str) -> str:
 
 
 def send_sms(subject: str, body: str) -> None:
-    smtp_host = os.environ["SMTP_HOST"]
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ["SMTP_USER"]
-    smtp_pass = os.environ["SMTP_PASS"]
-    sms_email = os.environ["SMS_EMAIL"]
-
-    msg = MIMEText(body)
-    msg["Subject"] = subject
-    msg["From"] = smtp_user
-    msg["To"] = sms_email
-
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
+    client = Client(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+    client.messages.create(
+        to=os.environ["TWILIO_TO_NUMBER"],
+        from_=os.environ["TWILIO_FROM_NUMBER"],
+        body=f"{subject}\n{body}",
+    )
 
 
 def main() -> int:

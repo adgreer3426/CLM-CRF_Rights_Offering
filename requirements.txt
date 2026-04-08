@@ -1,1 +1,2 @@
 requests>=2.31.0
+twilio>=9.0.0
