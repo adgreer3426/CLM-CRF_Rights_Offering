@@ -1,0 +1,41 @@
+name: Track Rights Offerings
+
+on:
+  schedule:
+    - cron: "0 * * * *"  # every hour on the hour
+  workflow_dispatch:      # allows manual run from GitHub UI
+
+permissions:
+  contents: write  # needed to commit state file back to repo
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tracker
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMS_EMAIL: ${{ secrets.SMS_EMAIL }}
+          EDGAR_AGENT: ${{ secrets.EDGAR_AGENT }}
+        run: python tracker.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add seen_filings.json
+          git diff --staged --quiet || git commit -m "chore: update seen filings state [skip ci]"
+          git push
